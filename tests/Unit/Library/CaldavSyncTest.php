@@ -143,7 +143,7 @@ class CaldavSyncTest extends TestCase
         $this->assertNull($this->caldav_sync()->get_blocked_host('https://93.184.216.34/dav.php/'));
     }
 
-    public function testAllowHostRecordsTheHostAndUnblocksTheUrl()
+    public function testAllowHostUnblocksTheUrlWithoutStoringItYet()
     {
         $caldav_url = 'http://192.168.1.50/dav.php/calendars/testuser/default/';
 
@@ -151,8 +151,20 @@ class CaldavSyncTest extends TestCase
 
         $caldav_sync->allow_host($caldav_url);
 
-        $this->assertSame('192.168.1.50', $GLOBALS['ea_test_settings']['caldav_allowed_hosts']);
         $this->assertNull($caldav_sync->get_blocked_host($caldav_url));
+        $this->assertArrayNotHasKey('caldav_allowed_hosts', $GLOBALS['ea_test_settings']);
+    }
+
+    public function testAllowedHostIsOnlyStoredOncePersisted()
+    {
+        $caldav_url = 'http://192.168.1.50/dav.php/calendars/testuser/default/';
+
+        $caldav_sync = $this->caldav_sync();
+
+        $caldav_sync->allow_host($caldav_url);
+        $caldav_sync->persist_allowed_host();
+
+        $this->assertSame('192.168.1.50', $GLOBALS['ea_test_settings']['caldav_allowed_hosts']);
     }
 
     public function testAllowHostAppendsWithoutDuplicating()
@@ -164,6 +176,7 @@ class CaldavSyncTest extends TestCase
         $caldav_sync->allow_host('http://192.168.1.50/dav.php/');
         $caldav_sync->allow_host('http://192.168.1.50/dav.php/');
         $caldav_sync->allow_host('http://BAIKAL/dav.php/');
+        $caldav_sync->persist_allowed_host();
 
         $this->assertSame("baikal\n192.168.1.50", $GLOBALS['ea_test_settings']['caldav_allowed_hosts']);
     }

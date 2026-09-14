@@ -29,6 +29,11 @@ use Sabre\VObject\Reader;
 class Caldav_sync
 {
     /**
+     * Host that the administrator confirmed for the current request, before it is stored.
+     */
+    private ?string $pending_allowed_host = null;
+
+    /**
      * @var EA_Controller|CI_Controller
      */
     protected EA_Controller|CI_Controller $CI;
@@ -534,9 +539,33 @@ class Caldav_sync
             return;
         }
 
+        // Only allow the host for the request at hand, so that a connection attempt that turns out to be wrong does
+        // not leave it permanently allowed. Call persist_allowed_host() once the connection actually worked.
+        $this->pending_allowed_host = $host;
+    }
+
+    /**
+     * Store the host that allow_host() confirmed for the current request.
+     *
+     * Only call this after the connection test succeeded, otherwise a failed attempt would widen the allowed
+     * connection URLs for good.
+     */
+    public function persist_allowed_host(): void
+    {
+        if (!$this->pending_allowed_host) {
+            return;
+        }
+
         $allowed_hosts = trim((string) setting('caldav_allowed_hosts', ''));
 
-        setting(['caldav_allowed_hosts' => $allowed_hosts === '' ? $host : $allowed_hosts . "\n" . $host]);
+        setting([
+            'caldav_allowed_hosts' =>
+                $allowed_hosts === ''
+                    ? $this->pending_allowed_host
+                    : $allowed_hosts . "\n" . $this->pending_allowed_host,
+        ]);
+
+        $this->pending_allowed_host = null;
     }
 
     /**
@@ -557,6 +586,10 @@ class Caldav_sync
             $host = parse_url($entry, PHP_URL_HOST) ?: $entry;
 
             $allowed_hosts[] = strtolower(trim((string) $host, '[]'));
+        }
+
+        if ($this->pending_allowed_host) {
+            $allowed_hosts[] = $this->pending_allowed_host;
         }
 
         return $allowed_hosts;

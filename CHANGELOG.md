@@ -12,7 +12,7 @@ developers to maintain and readjust their custom modifications on the main proje
 - The calendar page now explains why a CalDAV synchronization failed and what has to be corrected, instead of only
   reporting that it did
 - Connecting to a CalDAV server on a local network now offers to allow its host right in the connection dialog,
-  instead of requiring a trip to the settings
+  instead of requiring a trip to the settings; the host is only remembered once the connection actually works
 
 ### Changed
 

@@ -24,7 +24,10 @@ const zip = require('zip-dir');
 const debug = require('gulp-debug');
 
 function archive(done) {
-    const filename = 'easyappointments-0.0.0.zip';
+    const version = /\$config\['version'\] = '([^']+)'/.exec(
+        fs.readFileSync('application/config/app.php', 'utf8'),
+    )[1];
+    const filename = `easyappointments-${version}.zip`;
 
     fs.removeSync('build');
     fs.removeSync(filename);

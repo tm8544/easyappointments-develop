@@ -25,11 +25,14 @@ class Google_sync
 {
     /**
      * Number of times the event will be fetched again while the Google Meet conference is still pending.
+     *
+     * ponytail: a single retry keeps the booking request short, move the lookup to a background job if the link has
+     * to be available on the very first save every time.
      */
-    public const MEETING_LINK_ATTEMPTS = 3;
+    public const MEETING_LINK_ATTEMPTS = 1;
 
     /**
-     * Microseconds to wait between the attempts to fetch the pending Google Meet conference.
+     * Microseconds to wait before the pending Google Meet conference is fetched again.
      */
     public const MEETING_LINK_ATTEMPT_INTERVAL = 500000;
 
@@ -383,7 +386,10 @@ class Google_sync
 
             $status = $event->getConferenceData()?->getCreateRequest()?->getStatus()?->getStatusCode();
 
-            if ($status !== 'pending' || $attempt === self::MEETING_LINK_ATTEMPTS) {
+            // Give up quickly when the conference is still pending: the caller runs inside the booking request and
+            // the next appointment save fills the link in, as update_appointment() looks it up again while it is
+            // still empty.
+            if ($status !== 'pending' || $attempt === self::MEETING_LINK_ATTEMPTS || !$calendar_id) {
                 return null;
             }
 

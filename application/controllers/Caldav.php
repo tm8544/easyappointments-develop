@@ -66,8 +66,8 @@ class Caldav extends EA_Controller
 
             $provider = $this->providers_model->find($provider_id);
 
-            // The administrator confirmed the host of a server that sits on a private network, so record it before
-            // the connection is tested, otherwise the private address check rejects it again.
+            // The administrator confirmed the host of a server that sits on a private network, so allow it for this
+            // request, otherwise the private address check rejects it again before the connection can be tested.
             if (filter_var(request('allow_private_host'), FILTER_VALIDATE_BOOLEAN)) {
                 if (cannot('edit', PRIV_SYSTEM_SETTINGS)) {
                     throw new RuntimeException('You do not have the required permissions for this task.');
@@ -77,6 +77,9 @@ class Caldav extends EA_Controller
             }
 
             $this->caldav_sync->test_connection($caldav_url, $caldav_username, $caldav_password);
+
+            // Store the confirmed host only now, so that a failed attempt does not leave it allowed for good.
+            $this->caldav_sync->persist_allowed_host();
 
             $provider['settings']['caldav_sync'] = true;
             $provider['settings']['caldav_url'] = $caldav_url;
