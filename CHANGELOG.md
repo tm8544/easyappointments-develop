@@ -45,6 +45,8 @@ developers to maintain and readjust their custom modifications on the main proje
   other
 - The Google Calendar synchronization now fails with a clear error when the provider has no refresh token stored
 - Security: The Google Calendar API requests now verify the TLS certificate of the remote endpoint
+- Security: CalDAV connections no longer follow redirects or server links to other hosts, and no longer reach
+  private addresses through IPv6 transition addresses or a DNS answer that changes after the check
 - HTML texts, such as the privacy policy and the terms & conditions, are now purified with a cache directory
   inside storage/cache, so installations with a read-only vendor directory no longer fail with a write error
 - The list of Google Calendars of a provider is no longer readable without permission, so only that provider or a

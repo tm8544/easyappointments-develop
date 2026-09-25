@@ -5,10 +5,13 @@ namespace Tests\Unit\Library;
 use Caldav_sync;
 use DateTimeZone;
 use GuzzleHttp\Client;
+use GuzzleHttp\Exception\RequestException;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
 use InvalidArgumentException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use ReflectionClass;
 use Tests\TestCase;
 
@@ -120,6 +123,86 @@ class CaldavSyncTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
 
         $this->assert_safe_caldav_url('http://169.254.169.254/latest/meta-data/');
+    }
+
+    #[DataProvider('transitionAddressProvider')]
+    public function testPrivateAddressInsideATransitionAddressIsRejected(string $caldav_url)
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->assert_safe_caldav_url($caldav_url);
+    }
+
+    public static function transitionAddressProvider(): array
+    {
+        return [
+            'IPv4-mapped' => ['http://[::ffff:127.0.0.1]/dav.php/'],
+            'IPv4-compatible' => ['http://[::7f00:1]/dav.php/'],
+            'NAT64' => ['http://[64:ff9b::a9fe:a9fe]/latest/meta-data/'],
+            'local-use NAT64' => ['http://[64:ff9b:1::a00:1]/dav.php/'],
+            '6to4' => ['http://[2002:a00:1::]/dav.php/'],
+            'Teredo' => ['http://[2001:0:4136:e378:8000:63bf:80ff:fffe]/dav.php/'],
+            'shared address space' => ['http://100.100.100.200/latest/meta-data/'],
+        ];
+    }
+
+    public function testPublicAddressInsideATransitionAddressIsAccepted()
+    {
+        $this->assert_safe_caldav_url('http://[64:ff9b::5db8:d822]/dav.php/calendars/testuser/default/');
+
+        $this->assertTrue(true); // No exception thrown.
+    }
+
+    private function mocked_http_client(array $responses, array &$history = []): Client
+    {
+        $method = (new ReflectionClass(Caldav_sync::class))->getMethod('get_http_client');
+        $method->setAccessible(true);
+
+        $client = $method->invoke($this->caldav_sync(), 'https://93.184.216.34/dav.php/', 'user', 'secret');
+
+        $handler_stack = $client->getConfig('handler');
+        $handler_stack->setHandler(new MockHandler($responses));
+        $handler_stack->push(Middleware::history($history));
+
+        return $client;
+    }
+
+    public function testRedirectToAnotherServerIsNotFollowed()
+    {
+        $history = [];
+
+        $client = $this->mocked_http_client(
+            [new Response(302, ['Location' => 'http://169.254.169.254/latest/meta-data/']), new Response(200)],
+            $history,
+        );
+
+        try {
+            $client->request('PROPFIND', '');
+            $this->fail('The redirect to another server was followed.');
+        } catch (RequestException $e) {
+            $this->assertStringContainsString('169.254.169.254', $e->getMessage());
+        }
+
+        $this->assertCount(1, $history);
+    }
+
+    public function testRedirectOnTheSameServerIsFollowed()
+    {
+        $client = $this->mocked_http_client([
+            new Response(301, ['Location' => '/dav.php/calendars/user/']),
+            new Response(207, [], 'ok'),
+        ]);
+
+        $this->assertSame('ok', (string) $client->request('PROPFIND', '')->getBody());
+    }
+
+    public function testAbsoluteHrefOfAnotherServerIsNotRequested()
+    {
+        $client = $this->mocked_http_client([new Response(200)]);
+
+        $this->expectException(RequestException::class);
+
+        $client->request('GET', 'http://127.0.0.1:8080/calendars/user/event.ics');
     }
 
     private function caldav_sync(): Caldav_sync

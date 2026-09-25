@@ -14,8 +14,13 @@
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\Exception\RequestException;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
+use GuzzleHttp\Psr7\Uri;
 use Jsvrcek\ICS\Exception\CalendarEventException;
+use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\UriInterface;
 use Sabre\VObject\Component\VEvent;
 use Sabre\VObject\Reader;
 
@@ -452,7 +457,7 @@ class Caldav_sync
      */
     private function get_http_client(string $caldav_url, string $caldav_username, string $caldav_password): Client
     {
-        $this->assert_safe_caldav_url($caldav_url);
+        $pinned_ip = $this->assert_safe_caldav_url($caldav_url);
 
         if (!$caldav_username) {
             throw new InvalidArgumentException('Missing CalDAV username');
@@ -462,20 +467,65 @@ class Caldav_sync
             throw new InvalidArgumentException('Missing CalDAV password');
         }
 
-        return new Client([
-            'base_uri' => rtrim($caldav_url, '/') . '/',
+        $base_uri = new Uri(rtrim($caldav_url, '/') . '/');
+
+        $handler_stack = HandlerStack::create();
+
+        // Pushed last, this runs after the redirect middleware, so it also sees the requests that a redirect or an
+        // absolute href in a server response leads to. Neither may leave the server that was checked above.
+        $handler_stack->push(
+            Middleware::mapRequest(function (RequestInterface $request) use ($base_uri) {
+                if (!$this->is_same_origin($request->getUri(), $base_uri)) {
+                    throw new RequestException(
+                        'CalDAV request to another server is not allowed: ' . $request->getUri(),
+                        $request,
+                    );
+                }
+
+                return $request;
+            }),
+        );
+
+        $options = [
+            'base_uri' => $base_uri,
             'connect_timeout' => 15,
             'headers' => [
                 'Content-Type' => 'text/xml',
             ],
             'auth' => [$caldav_username, $caldav_password],
-        ]);
+            'handler' => $handler_stack,
+        ];
+
+        // Connect to the address that was checked, instead of letting cURL resolve the host again, as a second lookup
+        // may return a private address (DNS rebinding).
+        if ($pinned_ip) {
+            $port = $base_uri->getPort() ?? ($base_uri->getScheme() === 'https' ? 443 : 80);
+
+            $address = str_contains($pinned_ip, ':') ? '[' . $pinned_ip . ']' : $pinned_ip;
+
+            $options['curl'] = [CURLOPT_RESOLVE => [$base_uri->getHost() . ':' . $port . ':' . $address]];
+        }
+
+        return new Client($options);
+    }
+
+    /**
+     * Check whether both URIs point to the same scheme, host and port.
+     */
+    private function is_same_origin(UriInterface $uri, UriInterface $base_uri): bool
+    {
+        return strtolower($uri->getScheme()) === strtolower($base_uri->getScheme()) &&
+            strtolower($uri->getHost()) === strtolower($base_uri->getHost()) &&
+            $uri->getPort() === $base_uri->getPort();
     }
 
     /**
      * Ensure CalDAV URLs are valid and point to public network destinations.
+     *
+     * @return string|null The checked address to connect to, or NULL when the host needs no resolving (an IP address
+     * or a host allowed by the administrator).
      */
-    private function assert_safe_caldav_url(string $caldav_url): void
+    private function assert_safe_caldav_url(string $caldav_url): ?string
     {
         if (!filter_var($caldav_url, FILTER_VALIDATE_URL)) {
             throw new InvalidArgumentException('Invalid CalDAV URL provided.');
@@ -491,7 +541,7 @@ class Caldav_sync
         // Hosts that an administrator allowed in the CalDAV integration settings are trusted as they are, so that
         // installations with a CalDAV server on the local network can still reach it.
         if (in_array(strtolower($host), $this->get_allowed_hosts(), true)) {
-            return;
+            return null;
         }
 
         $resolved_ips = $this->resolve_host_ips($host);
@@ -503,10 +553,64 @@ class Caldav_sync
         }
 
         foreach ($resolved_ips as $resolved_ip) {
-            if (!filter_var($resolved_ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+            if (!$this->is_public_ip($resolved_ip)) {
                 throw new InvalidArgumentException('CalDAV URL host is not allowed: ' . $host);
             }
         }
+
+        if (filter_var($host, FILTER_VALIDATE_IP)) {
+            return null;
+        }
+
+        // Prefer IPv4, as servers without IPv6 connectivity would otherwise fail to connect to hosts that have both.
+        $ipv4_ips = array_filter($resolved_ips, fn($ip) => filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4));
+
+        return reset($ipv4_ips) ?: $resolved_ips[0];
+    }
+
+    /**
+     * Check whether the IP address belongs to the public network.
+     */
+    private function is_public_ip(string $ip): bool
+    {
+        if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+            return false;
+        }
+
+        $binary = inet_pton($ip);
+
+        if (strlen($binary) === 4) {
+            // Shared address space (100.64.0.0/10), used by carrier-grade NAT and some cloud metadata services.
+            return !(ord($binary[0]) === 100 && (ord($binary[1]) & 0xc0) === 64);
+        }
+
+        // Check the IPv4 address that these IPv6 addresses carry: IPv4-compatible (::/96), IPv4-mapped
+        // (::ffff:0:0/96), NAT64 (64:ff9b::/96) and 6to4 (2002::/16). The PHP filter does not look into all of them.
+        $embedded_ipv4 = match (true) {
+            str_starts_with($binary, str_repeat("\0", 12)),
+            str_starts_with($binary, str_repeat("\0", 10) . "\xff\xff"),
+            str_starts_with($binary, "\x00\x64\xff\x9b" . str_repeat("\0", 8))
+                => substr($binary, 12, 4),
+            str_starts_with($binary, "\x20\x02") => substr($binary, 2, 4),
+            default => null,
+        };
+
+        if ($embedded_ipv4 !== null) {
+            return $this->is_public_ip(inet_ntop($embedded_ipv4));
+        }
+
+        // Local-use NAT64 (64:ff9b:1::/48), Teredo (2001::/32), documentation (2001:db8::/32) and discard (100::/64)
+        // addresses either tunnel into other networks or are never public.
+        foreach (
+            ["\x00\x64\xff\x9b\x00\x01", "\x20\x01\x00\x00", "\x20\x01\x0d\xb8", "\x01\x00" . str_repeat("\0", 6)]
+            as $prefix
+        ) {
+            if (str_starts_with($binary, $prefix)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
